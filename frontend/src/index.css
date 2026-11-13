@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased selection:bg-emerald-500 selection:text-slate-950;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Custom subtle scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #020617;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1e293b;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #334155;
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(16, 185, 129, 0.25);
+  }
+  50% {
+    box-shadow: 0 0 28px rgba(16, 185, 129, 0.55);
+  }
+}
+
+@keyframes pulseGlowRose {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(244, 63, 94, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(244, 63, 94, 0.45);
+  }
+}
+
+@keyframes pulseGlowCyan {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(6, 182, 212, 0.25);
+  }
+  50% {
+    box-shadow: 0 0 28px rgba(6, 182, 212, 0.55);
+  }
+}
+
+@keyframes floatSlow {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.animate-glow-emerald {
+  animation: pulseGlow 3s ease-in-out infinite;
+}
+
+.animate-glow-rose {
+  animation: pulseGlowRose 3s ease-in-out infinite;
+}
+
+.animate-glow-cyan {
+  animation: pulseGlowCyan 3s ease-in-out infinite;
+}
+
+.animate-float {
+  animation: floatSlow 4s ease-in-out infinite;
+}
+
+.glass-panel {
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-panel-elevated {
+  background: rgba(30, 41, 59, 0.7);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.parking-bay-lines {
+  background-image: repeating-linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.03) 0px,
+    rgba(255, 255, 255, 0.03) 1px,
+    transparent 1px,
+    transparent 32px
+  );
+}

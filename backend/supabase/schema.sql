@@ -1,0 +1,52 @@
+-- Таблица парковочных мест
+create table if not exists public.spots (
+  id text primary key,
+  number integer not null,
+  type text not null check (type in ('EV', 'regular')),
+  status text not null default 'available' check (status in ('available', 'booked')),
+  driver_name text,
+  license_plate text,
+  booked_at timestamptz,
+  booked_until timestamptz
+);
+
+-- Гарантируем наличие поля booked_until
+alter table public.spots add column if not exists booked_until timestamptz;
+
+-- Включаем Row Level Security (RLS) для защиты базы данных
+alter table public.spots enable row level security;
+
+-- Очистка старых / небезопасных политик
+drop policy if exists "Allow all users to read spots" on public.spots;
+drop policy if exists "Allow all users to update spots" on public.spots;
+drop policy if exists "Allow insert spots" on public.spots;
+drop policy if exists "Allow update spots" on public.spots;
+drop policy if exists "Allow select spots" on public.spots;
+drop policy if exists "Allow public read-only access to spots" on public.spots;
+
+-- БЕЗОПАСНАЯ ПОЛИТИКА:
+-- Анонимные и публичные пользователи могут ТОЛЬКО читать (SELECT) список мест.
+-- Прямые UPDATE, INSERT, DELETE из браузера через anon key ЗАБЛОКИРОВАНЫ.
+-- Все изменения производятся только через проверенный бэкенд с service_role ключом.
+create policy "Allow public read-only access to spots"
+  on public.spots for select
+  using (true);
+
+-- Начальные данные
+insert into public.spots (id, number, type, status) values
+  ('EV-1', 1, 'EV', 'available'),
+  ('EV-2', 2, 'EV', 'available'),
+  ('EV-3', 3, 'EV', 'available'),
+  ('EV-4', 4, 'EV', 'available'),
+  ('EV-5', 5, 'EV', 'available'),
+  ('R-1', 6, 'regular', 'available'),
+  ('R-2', 7, 'regular', 'available'),
+  ('R-3', 8, 'regular', 'available'),
+  ('R-4', 9, 'regular', 'available'),
+  ('R-5', 10, 'regular', 'available'),
+  ('R-6', 11, 'regular', 'available'),
+  ('R-7', 12, 'regular', 'available'),
+  ('R-8', 13, 'regular', 'available'),
+  ('R-9', 14, 'regular', 'available'),
+  ('R-10', 15, 'regular', 'available')
+on conflict (id) do nothing;
