@@ -116,6 +116,13 @@ const spots = [
     bookedUntil: null,
   })),
 ];
+const bookingHistory = [];
+const localUsers = new Map();
+const HOURLY_RATES = { regular: 5000, EV: 8000 };
+
+function bookingPrice(type, minutes) {
+  return Math.ceil(minutes / 60 * HOURLY_RATES[type]);
+}
 
 function autoReleaseExpiredSpots() {
   const now = new Date();
@@ -269,6 +276,8 @@ app.post("/api/spots/:id/book", validateSpotId, bookLimiter, async (req, res, ne
     const licensePlate = sanitizeText(req.body.licensePlate).toUpperCase();
     const rawMinutes = Number(req.body.durationMinutes);
     const durationMinutes = Math.min(Math.max(Number.isFinite(rawMinutes) ? rawMinutes : 60, 15), 1440);
+    const spotType = req.params.id.toUpperCase().startsWith("EV-") ? "EV" : "regular";
+    const amount = bookingPrice(spotType, durationMinutes);
 
     // Строгая проверка имени водителя
     if (!DRIVER_NAME_REGEX.test(driverName)) {
@@ -297,10 +306,17 @@ app.post("/api/spots/:id/book", validateSpotId, bookLimiter, async (req, res, ne
       if (!updated) {
         return res.status(409).json({ message: "Это место уже занято другим водителем." });
       }
+      try {
+        await supabaseClient.recordBooking(updated.id, durationMinutes, amount);
+      } catch (err) {
+        await supabaseClient.releaseSpot(updated.id);
+        throw err;
+      }
 
       return res.status(201).json({
         message: `Место ${updated.id} успешно забронировано на ${durationMinutes} мин.`,
         spot: publicSpot(updated),
+        amount,
       });
     }
 
@@ -320,10 +336,15 @@ app.post("/api/spots/:id/book", validateSpotId, bookLimiter, async (req, res, ne
     spot.licensePlate = licensePlate;
     spot.bookedAt = bookedAt;
     spot.bookedUntil = bookedUntil;
+    if (bookingHistory.some((entry) => entry.isDemo)) {
+      bookingHistory.splice(0, bookingHistory.length, ...bookingHistory.filter((entry) => !entry.isDemo));
+    }
+    bookingHistory.push({ spotId: spot.id, amount, createdAt: bookedAt, isDemo: false });
 
     return res.status(201).json({
       message: `Место ${spot.id} успешно забронировано на ${durationMinutes} мин.`,
       spot: publicSpot(spot),
+      amount,
     });
   } catch (err) {
     next(err);
@@ -380,6 +401,39 @@ app.post("/api/admin/login", checkLoginLockout, loginLimiter, async (req, res) =
   });
 });
 
+app.post("/api/auth/register", loginLimiter, async (req, res, next) => {
+  try {
+    const name = sanitizeText(req.body.name);
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || "");
+    if (!/^[\p{L} .'-]{2,60}$/u.test(name) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8 || password.length > 72) {
+      return res.status(400).json({ message: "Укажите имя, корректную почту и пароль от 8 до 72 символов." });
+    }
+    const existing = supabaseClient.isSupabaseConfigured ? await supabaseClient.findUserByEmail(email) : localUsers.get(email);
+    if (existing) return res.status(409).json({ message: "Аккаунт с такой почтой уже существует." });
+    const passwordHash = await bcrypt.hash(password, 12);
+    const user = supabaseClient.isSupabaseConfigured
+      ? await supabaseClient.createUser(name, email, passwordHash)
+      : { id: crypto.randomUUID(), name, email, password_hash: passwordHash };
+    if (!supabaseClient.isSupabaseConfigured) localUsers.set(email, user);
+    const token = jwt.sign({ role: "user", userId: String(user.id), email: user.email, name: user.name }, JWT_SECRET, { algorithm: "HS256", expiresIn: "7d" });
+    return res.status(201).json({ token, user: { name: user.name, email: user.email } });
+  } catch (err) { next(err); }
+});
+
+app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || "");
+    const user = supabaseClient.isSupabaseConfigured ? await supabaseClient.findUserByEmail(email) : localUsers.get(email);
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(401).json({ message: "Неверная почта или пароль." });
+    }
+    const token = jwt.sign({ role: "user", userId: String(user.id), email: user.email, name: user.name }, JWT_SECRET, { algorithm: "HS256", expiresIn: "7d" });
+    return res.json({ token, user: { name: user.name, email: user.email } });
+  } catch (err) { next(err); }
+});
+
 app.get("/api/admin/spots", authAdmin, async (_req, res, next) => {
   try {
     autoReleaseExpiredSpots();
@@ -392,6 +446,38 @@ app.get("/api/admin/spots", authAdmin, async (_req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+app.get("/api/admin/revenue", authAdmin, async (_req, res, next) => {
+  try {
+    const rows = supabaseClient.isSupabaseConfigured
+      ? await supabaseClient.getRevenueStats()
+      : bookingHistory;
+    const now = new Date();
+    const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
+    const weekStart = new Date(dayStart); weekStart.setDate(weekStart.getDate() - 6);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const period = ["day", "week", "month", "all"].includes(_req.query.period) ? _req.query.period : "month";
+    const periodStart = period === "day" ? dayStart : period === "week" ? weekStart : period === "month" ? monthStart : new Date(0);
+    const bySpot = rows.reduce((result, row) => {
+      const createdAt = new Date(row.createdAt || row.created_at);
+      if (createdAt >= periodStart) {
+        const spotId = row.spotId || row.spot_id;
+        result[spotId] = (result[spotId] || 0) + Number(row.amount ?? row.amount_uzs ?? 0);
+      }
+      return result;
+    }, {});
+    const amountSince = (start) => rows.reduce((sum, row) =>
+      new Date(row.createdAt || row.created_at) >= start ? sum + Number(row.amount ?? row.amount_uzs ?? 0) : sum, 0);
+    const demoRows = [
+      { spotId: "R-1 · демо", amount: 45000, createdAt: new Date(Date.now() - 60 * 60 * 1000) },
+      { spotId: "EV-2 · демо", amount: 72000, createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+      { spotId: "R-5 · демо", amount: 95000, createdAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) },
+      { spotId: "EV-4 · демо", amount: 128000, createdAt: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000) },
+    ].filter((row) => row.createdAt >= periodStart).map(({ spotId, amount }) => ({ spotId, amount }));
+    const actualBySpot = Object.entries(bySpot).map(([spotId, amount]) => ({ spotId, amount }));
+    return res.json({ today: amountSince(dayStart), week: amountSince(weekStart), month: amountSince(monthStart), total: rows.reduce((sum, row) => sum + Number(row.amount ?? row.amount_uzs ?? 0), 0), bySpot: [...actualBySpot, ...demoRows].sort((a, b) => b.amount - a.amount), hasDemo: demoRows.length > 0, currency: "UZS" });
+  } catch (err) { next(err); }
 });
 
 app.post("/api/admin/spots/:id/release", validateSpotId, authAdmin, async (req, res, next) => {

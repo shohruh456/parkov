@@ -99,6 +99,36 @@ async function bookSpot(id, driverName, licensePlate, durationMinutes = 60) {
   return fromRow(data);
 }
 
+async function recordBooking(spotId, durationMinutes, amount) {
+  assertSupabase();
+  const { error } = await supabase.from("bookings").insert({
+    spot_id: cleanSpotId(spotId), duration_minutes: durationMinutes, amount_uzs: amount,
+  });
+  if (error) throw error;
+}
+
+async function getRevenueStats() {
+  assertSupabase();
+  const { data, error } = await supabase.from("bookings")
+    .select("spot_id, amount_uzs, created_at").order("created_at", { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+async function findUserByEmail(email) {
+  assertSupabase();
+  const { data, error } = await supabase.from("app_users").select("id, name, email, password_hash").eq("email", email).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function createUser(name, email, passwordHash) {
+  assertSupabase();
+  const { data, error } = await supabase.from("app_users").insert({ name, email, password_hash: passwordHash }).select("id, name, email").single();
+  if (error) throw error;
+  return data;
+}
+
 async function releaseSpot(id) {
   assertSupabase();
   const cleanId = cleanSpotId(id);
@@ -176,6 +206,10 @@ module.exports = {
   listSpots,
   getSpot,
   bookSpot,
+  recordBooking,
+  getRevenueStats,
+  findUserByEmail,
+  createUser,
   releaseSpot,
   releaseExpiredSpots,
   ensureSpots,

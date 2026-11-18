@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 
 const api = axios.create({
@@ -7,6 +7,8 @@ const api = axios.create({
 });
 
 const TOKEN_KEY = "parcov_admin_token";
+const USER_TOKEN_KEY = "parcov_user_token";
+const USER_PROFILE_KEY = "parcov_user_profile";
 
 const DURATION_PRESETS = [
   { label: "30 мин", minutes: 30 },
@@ -107,6 +109,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [parkingEvent, setParkingEvent] = useState(null);
+  const previousSpotStatuses = useRef(null);
   const [now, setNow] = useState(Date.now());
 
   // Search & Filter
@@ -130,6 +134,18 @@ export default function App() {
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [releasingId, setReleasingId] = useState("");
+  const [revenue, setRevenue] = useState(null);
+  const [revenuePeriod, setRevenuePeriod] = useState("month");
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState("login");
+  const [authName, setAuthName] = useState("");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [userProfile, setUserProfile] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(USER_PROFILE_KEY) || "null"); } catch { return null; }
+  });
 
   const isAdmin = Boolean(token);
 
@@ -145,7 +161,22 @@ export default function App() {
       const { data } = await api.get(endpoint, {
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       });
-      setSpots(data.spots || []);
+      const nextSpots = data.spots || [];
+      const previous = previousSpotStatuses.current;
+      if (previous) {
+        const changedSpot = nextSpots.find((spot) => previous[spot.id] && previous[spot.id] !== spot.status);
+        if (changedSpot) {
+          setParkingEvent({
+            id: changedSpot.id,
+            status: changedSpot.status,
+            message: changedSpot.status === "booked"
+              ? `Появилась бронь: место ${changedSpot.id} занято.`
+              : `Место ${changedSpot.id} освободилось. Бронь завершена или автомобиль уехал.`,
+          });
+        }
+      }
+      previousSpotStatuses.current = Object.fromEntries(nextSpots.map((spot) => [spot.id, spot.status]));
+      setSpots(nextSpots);
       setError("");
     } catch (err) {
       if (err.response?.status === 401 && token) {
@@ -166,10 +197,30 @@ export default function App() {
   }, [loadSpots]);
 
   useEffect(() => {
+    if (!isAdmin) { setRevenue(null); return undefined; }
+    let active = true;
+    const loadRevenue = async () => {
+      try {
+        const { data } = await api.get("/admin/revenue", { params: { period: revenuePeriod }, headers: { Authorization: `Bearer ${token}` } });
+        if (active) setRevenue(data);
+      } catch { /* Revenue panel can retry on next refresh. */ }
+    };
+    loadRevenue();
+    const timer = setInterval(loadRevenue, 15000);
+    return () => { active = false; clearInterval(timer); };
+  }, [isAdmin, token, revenuePeriod]);
+
+  useEffect(() => {
     if (!notice) return undefined;
     const timer = setTimeout(() => setNotice(""), 4500);
     return () => clearTimeout(timer);
   }, [notice]);
+
+  useEffect(() => {
+    if (!parkingEvent) return undefined;
+    const timer = setTimeout(() => setParkingEvent(null), 6000);
+    return () => clearTimeout(timer);
+  }, [parkingEvent]);
 
   const stats = useMemo(() => {
     const ev = spots.filter((s) => s.type === "EV");
@@ -221,7 +272,8 @@ export default function App() {
         licensePlate,
         durationMinutes: chosenDuration,
       });
-      setNotice(`Место ${selectedSpot.id} успешно забронировано на ${chosenDuration} мин.`);
+      if (previousSpotStatuses.current) previousSpotStatuses.current[selectedSpot.id] = "booked";
+      setNotice(`Место ${selectedSpot.id} забронировано на ${chosenDuration} мин. К оплате: ${money(data.amount)}.`);
       setSelectedSpot(null);
       setDriverName("");
       setLicensePlate("");
@@ -263,6 +315,34 @@ export default function App() {
     }
   }
 
+  async function submitUserAuth(event) {
+    event.preventDefault();
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const { data } = await api.post(`/auth/${authMode === "signup" ? "register" : "login"}`, {
+        ...(authMode === "signup" ? { name: authName.trim() } : {}),
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      localStorage.setItem(USER_TOKEN_KEY, data.token);
+      localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(data.user));
+      setUserProfile(data.user);
+      setAuthPassword("");
+      setAuthOpen(false);
+      setNotice(authMode === "signup" ? "Аккаунт создан. Добро пожаловать!" : "Вы вошли в аккаунт.");
+    } catch (err) {
+      setAuthError(err.response?.data?.message || "Не удалось выполнить вход. Проверьте соединение и данные.");
+    } finally { setAuthBusy(false); }
+  }
+
+  function logoutUser() {
+    localStorage.removeItem(USER_TOKEN_KEY);
+    localStorage.removeItem(USER_PROFILE_KEY);
+    setUserProfile(null);
+    setNotice("Вы вышли из аккаунта.");
+  }
+
   function logout() {
     localStorage.removeItem(TOKEN_KEY);
     setToken("");
@@ -279,6 +359,7 @@ export default function App() {
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
+      if (previousSpotStatuses.current) previousSpotStatuses.current[id] = "available";
       setNotice(data.message || `Место ${id} освобождено.`);
       await loadSpots();
     } catch (err) {
@@ -294,6 +375,10 @@ export default function App() {
     const end = new Date(Date.now() + mins * 60000);
     return end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }, [durationMinutes, customDuration]);
+  const bookingPrice = selectedSpot
+    ? Math.ceil(((customDuration ? Number(customDuration) : durationMinutes) / 60) * (selectedSpot.type === "EV" ? 8000 : 5000))
+    : 0;
+  const money = (amount) => `${Number(amount || 0).toLocaleString("ru-RU")} сум`;
 
   return (
     <div className="relative min-h-screen bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(16,185,129,0.12),rgba(2,6,23,0.98))] pb-20">
@@ -328,6 +413,16 @@ export default function App() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
+              {userProfile ? (
+                <div className="flex items-center gap-3 rounded-2xl border border-sky-500/25 bg-sky-950/30 px-4 py-2.5">
+                  <span className="max-w-36 truncate text-xs font-semibold text-sky-200">{userProfile.name}</span>
+                  <button type="button" onClick={logoutUser} className="rounded-lg bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 transition hover:bg-rose-500/20 hover:text-rose-200">Выйти</button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => { setAuthMode("login"); setAuthOpen(true); setAuthError(""); }} className="inline-flex items-center gap-2 rounded-2xl border border-sky-500/30 bg-sky-950/30 px-4 py-3 text-sm font-semibold text-sky-100 transition hover:border-sky-400/60 hover:bg-sky-900/40">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-sky-400/15 text-xs text-sky-300">{authEmail ? authEmail[0].toUpperCase() : "↗"}</span>Войти / Регистрация
+                </button>
+              )}
               {isAdmin ? (
                 <div className="flex items-center gap-3 rounded-2xl border border-emerald-500/30 bg-emerald-950/40 px-4 py-2.5">
                   <div className="flex items-center gap-2 text-xs font-semibold text-emerald-300">
@@ -355,6 +450,11 @@ export default function App() {
             </div>
           </div>
         </header>
+
+        <section className="glass-panel mb-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl px-5 py-4">
+          <div><h2 className="text-sm font-bold text-white">Тарифы парковки</h2><p className="mt-1 text-xs text-slate-400">Цена рассчитывается по времени бронирования, неполный час округляется вверх</p></div>
+          <div className="flex gap-3 text-sm font-semibold"><span className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-emerald-200">Обычное место · 5 000 сум/час</span><span className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-2 text-sky-200">EV · 8 000 сум/час</span></div>
+        </section>
 
         {/* Global Notifications */}
         {(error || notice) && (
@@ -384,8 +484,15 @@ export default function App() {
           </div>
         )}
 
+        {parkingEvent && (
+          <div role="status" className={`mb-6 flex items-center justify-between rounded-2xl border p-4 text-sm font-semibold shadow-lg ${parkingEvent.status === "booked" ? "border-rose-500/40 bg-rose-950/70 text-rose-200" : "border-emerald-500/40 bg-emerald-950/70 text-emerald-200"}`}>
+            <span>{parkingEvent.message}</span>
+            <button type="button" onClick={() => setParkingEvent(null)} className="ml-4 opacity-80 hover:opacity-100" aria-label="Закрыть уведомление"><CloseIcon className="h-4 w-4" /></button>
+          </div>
+        )}
+
         {/* Stat Cards */}
-        <section className="mb-8 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+        {isAdmin && <section className="mb-8 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
           <StatCard
             label="Свободно мест"
             value={stats.available}
@@ -414,7 +521,24 @@ export default function App() {
             tone="amber"
             badge="Стандартные места"
           />
-        </section>
+        </section>}
+
+        {isAdmin && (
+          <section className="glass-panel mb-8 rounded-2xl p-5">
+            <div className="mb-4 flex items-center justify-between">
+              <div><h2 className="text-lg font-bold text-white">Выручка от бронирований</h2><p className="text-xs text-slate-400">Начислено по созданным броням · суммы в сумах</p></div>
+              <span className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">{revenue ? "Обновляется" : "Загрузка…"}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {[["Сегодня", revenue?.today], ["7 дней", revenue?.week], ["Этот месяц", revenue?.month], ["За всё время", revenue?.total]].map(([label, value]) => <div key={label} className="rounded-xl border border-slate-800 bg-slate-950/60 p-4"><p className="text-xs text-slate-400">{label}</p><p className="mt-1 text-lg font-bold text-white">{money(value)}</p></div>)}
+            </div>
+            <div className="mt-6 border-t border-slate-800 pt-5">
+              {revenue?.hasDemo && <p className="mb-3 rounded-lg border border-amber-500/20 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">Столбцы с пометкой «демо» — примеры. Они не входят в суммы выручки выше.</p>}
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-semibold text-white">Выручка по парковочным местам</h3><p className="text-xs text-slate-400">Начисления за выбранный период</p></div><select aria-label="Период графика выручки" value={revenuePeriod} onChange={(e) => setRevenuePeriod(e.target.value)} className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white"><option value="day">Сегодня</option><option value="week">7 дней</option><option value="month">Этот месяц</option><option value="all">Всё время</option></select></div>
+              {revenue?.bySpot?.length ? <div className="mt-5 overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40 p-4"><div className="flex h-56 min-w-max items-end gap-3 border-b border-slate-700 px-2 sm:min-w-0 sm:gap-4">{revenue.bySpot.map(({ spotId, amount }) => { const maxAmount = Math.max(...revenue.bySpot.map((item) => item.amount)); const height = Math.max(8, amount / maxAmount * 100); return <div key={spotId} className="flex h-full min-w-16 flex-1 flex-col items-center justify-end gap-2"><span className="whitespace-nowrap text-[10px] font-semibold text-slate-300 sm:text-xs">{money(amount)}</span><div className="w-full max-w-20 rounded-t-lg bg-gradient-to-t from-emerald-600 to-teal-300 shadow-lg shadow-emerald-500/10" style={{ height: `${height}%` }} title={`${spotId}: ${money(amount)}`} /><span className="translate-y-6 text-[10px] font-semibold text-slate-400 sm:text-xs">{spotId}</span></div>; })}</div><div className="h-7" /></div> : <p className="rounded-xl bg-slate-950/50 p-5 text-center text-sm text-slate-400">За этот период бронирований пока нет</p>}
+            </div>
+          </section>
+        )}
 
         {/* Filter and Search Bar */}
         <div className="glass-panel mb-8 flex flex-col gap-4 rounded-2xl p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -585,6 +709,10 @@ export default function App() {
           </div>
 
           <form className="space-y-4" onSubmit={submitBooking}>
+            <div className="rounded-xl border border-amber-500/25 bg-amber-950/20 p-3 text-xs text-amber-200">
+              Тариф: {selectedSpot.type === "EV" ? "8 000" : "5 000"} сум/час · оплата на месте
+              <div className="mt-1 text-sm font-bold text-white">К оплате: {money(bookingPrice)}</div>
+            </div>
             {/* Duration Selector */}
             <div>
               <label className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-300">
@@ -696,6 +824,27 @@ export default function App() {
                 )}
               </button>
             </div>
+          </form>
+        </Modal>
+      )}
+
+      {authOpen && (
+        <Modal title="Ваш PARCOV" onClose={() => { setAuthOpen(false); setAuthError(""); }}>
+          <div className="relative mb-5 overflow-hidden rounded-2xl border border-emerald-500/20 bg-gradient-to-br from-emerald-950/70 via-slate-950 to-sky-950/50 p-5">
+            <div className="pointer-events-none absolute -right-8 -top-12 h-32 w-32 rounded-full bg-emerald-400/15 blur-3xl" />
+            <div className="relative flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-400 text-slate-950 shadow-lg shadow-emerald-500/20"><CarIcon className="h-6 w-6" /></div><div><p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-300">Умная парковка</p><h4 className="mt-0.5 text-lg font-bold text-white">Бронируйте быстрее</h4></div></div>
+            <p className="relative mt-3 text-sm leading-relaxed text-slate-300">Создайте аккаунт или войдите, чтобы начать пользоваться PARCOV.</p>
+          </div>
+          <div className="mb-5 grid grid-cols-2 rounded-xl border border-slate-800 bg-slate-950/70 p-1">
+            {[['login', 'Вход'], ['signup', 'Регистрация']].map(([mode, label]) => <button key={mode} type="button" onClick={() => { setAuthMode(mode); setAuthError(""); }} className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition ${authMode === mode ? "bg-slate-800 text-white shadow" : "text-slate-400 hover:text-white"}`}>{label}</button>)}
+          </div>
+          {authError && <div role="alert" className="mb-4 rounded-xl border border-rose-500/30 bg-rose-950/40 px-3.5 py-3 text-sm text-rose-200">{authError}</div>}
+          <form className="space-y-4" onSubmit={submitUserAuth}>
+            {authMode === "signup" && <div><label className="mb-1.5 block text-xs font-semibold text-slate-300">Ваше имя</label><input required minLength={2} maxLength={60} autoComplete="name" value={authName} onChange={(e) => setAuthName(e.target.value)} placeholder="Например, Алиса" className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/15" /></div>}
+            <div><label className="mb-1.5 block text-xs font-semibold text-slate-300">Электронная почта</label><input required type="email" autoComplete="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="name@example.com" className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/15" /></div>
+            <div><label className="mb-1.5 block text-xs font-semibold text-slate-300">Пароль</label><input required type="password" minLength={8} maxLength={72} autoComplete={authMode === "signup" ? "new-password" : "current-password"} value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Минимум 8 символов" className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/15" /><p className="mt-1.5 text-[11px] text-slate-500">Используйте не менее 8 символов.</p></div>
+            <button type="submit" disabled={authBusy} className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-400 to-teal-300 px-4 py-3 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-500/15 transition hover:brightness-105 disabled:cursor-wait disabled:opacity-60">{authBusy ? <><span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-950/30 border-t-slate-950" />Подождите…</> : authMode === "signup" ? "Создать аккаунт" : "Войти в аккаунт"}</button>
+            <p className="text-center text-xs text-slate-500">Продолжая, вы соглашаетесь с правилами использования сервиса.</p>
           </form>
         </Modal>
       )}
