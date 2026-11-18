@@ -161,6 +161,9 @@ export default function App() {
       const { data } = await api.get(endpoint, {
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       });
+      if (!Array.isArray(data?.spots)) {
+        throw new Error("PARKING_API_NOT_CONFIGURED");
+      }
       const nextSpots = data.spots || [];
       const previous = previousSpotStatuses.current;
       if (previous) {
@@ -184,7 +187,9 @@ export default function App() {
         setToken("");
         return;
       }
-      setError(err.response?.data?.message || "Не удалось загрузить данные парковки.");
+      setError(err.message === "PARKING_API_NOT_CONFIGURED" || err.response?.status === 404
+        ? "Сервер парковки не подключён. Разместите backend и укажите его адрес в Netlify → Environment variables → VITE_API_URL, затем пересоберите сайт."
+        : err.response?.data?.message || "Не удалось загрузить данные парковки. Проверьте доступность backend и настройку VITE_API_URL.");
     } finally {
       setLoading(false);
     }
@@ -640,7 +645,7 @@ export default function App() {
               />
             )}
 
-            {filteredSpots.length === 0 && (
+            {filteredSpots.length === 0 && !error && (
               <div className="glass-panel rounded-3xl p-12 text-center">
                 <CarIcon className="mx-auto h-12 w-12 text-slate-600" />
                 <h3 className="mt-4 text-base font-semibold text-white">Парковочные места не найдены</h3>
